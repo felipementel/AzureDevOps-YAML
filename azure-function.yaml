@@ -1,0 +1,124 @@
+# https://github.com/microsoft/azure-pipelines-yaml/blob/master/templates/asp.net-core-functionapp-to-windows-on-azure.yml
+# https://docs.microsoft.com/en-us/azure/devops/pipelines/tasks/test/publish-test-results?view=azure-devops&tabs=trx%2Cyaml
+# https://docs.microsoft.com/en-us/azure/devops/pipelines/ecosystems/dotnet-core?view=azure-devops&tabs=dotnetfive
+# https://docs.microsoft.com/en-us/azure/devops/pipelines/process/run-number?view=azure-devops&tabs=yaml
+
+name: functions-NAME-$(Date:yyyyMMdd)-$(Rev:r)
+
+resources:
+  repositories:
+  - repository: self
+    type: AzureRepos
+    trigger:
+      branches:
+        include:
+        - main
+      paths:
+        include:
+        - src/*
+        exclude:
+        - README.md
+
+variables:
+- name: functionAppName
+  value: 'func-NAME-dev'
+- name: buildConfiguration
+  value: Release
+- name: serviceConnection
+  value: 'Service-Connection-NAME'
+- name: vmImageName
+  value: 'ubuntu-20.04'
+- name: workingDirectory
+  value: 'src/PROJECT-FOLDER'
+- name: testTitle
+  value: 'Project NAME'
+
+pool:
+  vmImage: $(vmImageName)
+
+
+stages:
+- stage: Build
+  displayName: Build stage
+
+  jobs:
+  - job: Build
+    displayName: Build
+    pool:
+      vmImage: $(vmImageName)
+
+    steps:
+
+    - task: UseDotNet@2
+      inputs:
+        version: '3.1.x'
+        includePreviewVersions: false
+
+    - task: DotNetCoreCLI@2
+      displayName: 'dotnet restore'
+      inputs:
+        command: restore
+        projects: '**/*.csproj'
+        feedsToUse: config
+        nugetConfigPath: 'src/nuget.config'
+
+    - task: DotNetCoreCLI@2
+      displayName: 'dotnet build'
+      inputs:
+        command: 'build'
+        projects: |
+          $(workingDirectory)/*.csproj
+        arguments: --output $(System.DefaultWorkingDirectory)/publish_output --configuration $(buildConfiguration)
+    
+    - task: DotNetCoreCLI@2
+      displayName: 'dotnet test'
+      inputs:
+        command: 'test'
+        projects: '**/*Tests/*.csproj'
+        arguments: '--configuration $(buildConfiguration) /p:CollectCoverage=true /p:CoverletOutputFormat=cobertura /p:CoverletOutput=$(Build.SourcesDirectory)/TestResults/Coverage/'
+        testRunTitle: $(testTitle)
+        workingDirectory: '$(System.DefaultWorkingDirectory)'
+    
+    - task: PublishCodeCoverageResults@1
+      displayName: 'Publish code coverage report'
+      inputs:
+        codeCoverageTool: 'Cobertura'
+        summaryFileLocation: '$(Build.SourcesDirectory)/**/coverage.cobertura.xml'
+
+    - task: ArchiveFiles@2
+      displayName: 'Archive files'
+      inputs:
+        rootFolderOrFile: '$(System.DefaultWorkingDirectory)/publish_output'
+        includeRootFolder: false
+        archiveType: zip
+        archiveFile: $(Build.ArtifactStagingDirectory)/$(Build.BuildId).zip
+        replaceExistingArchive: true
+
+    - publish: $(Build.ArtifactStagingDirectory)/$(Build.BuildId).zip
+      artifact: drop
+
+- stage: Deploy ENV-NAME
+  displayName: Deploy ENV-NAME
+  dependsOn: Build
+  condition: succeeded()
+
+  jobs:
+  - deployment: Deploy
+    displayName: Deploy
+    environment: 'Environment NAME'
+    variables:
+      - group: library-NAME
+    pool:
+      vmImage: $(vmImageName)
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: AzureFunctionApp@1
+            displayName: 'Azure functions app deploy'
+            inputs:
+              azureSubscription: '$(serviceConnection)'
+              appType: functionApp
+              appName: $(functionAppName)
+              package: '$(Pipeline.Workspace)/drop/$(Build.BuildId).zip'
+              
