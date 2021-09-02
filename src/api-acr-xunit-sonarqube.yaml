@@ -1,0 +1,182 @@
+# https://docs.microsoft.com/en-us/azure/devops/pipelines/ecosystems/kubernetes/aks-template?view=azure-devops
+# https://docs.microsoft.com/en-us/azure/devops/pipelines/process/stages?view=azure-devops&tabs=yaml
+# https://docs.microsoft.com/pt-br/azure/devops/pipelines/process/run-number?view=azure-devops&tabs=yaml
+
+#######################################
+###### BUILD IMAGE AND PUSH TO ACR ####
+#######################################
+
+name: projectName-$(Date:yyyyMMdd)-$(Rev:r)
+
+resources:
+  repositories:
+  - repository: self
+    type: AzureRepos
+    trigger:
+      branches:
+        include:
+        - main
+      paths:
+        include:
+        - src/*
+        exclude:
+        - README.md
+
+variables:
+- group: Library-Shared
+- name: buildConfiguration
+  value: Release 
+- name: dockerfilePath
+  value: '**/Dockerfile'
+- name: tag
+  value: '$(Build.BuildId)-dev'
+- name: ContainerRegistry
+  value: NAMEContainerRegistry-ServiceConnection
+- name: "imageRepository"
+  value: projectName-api
+- name: appName
+  value: AzureAppName-dev
+- name: "workingDirectory"
+  value: src/ProjectFolder.API
+- name: ProjectTestName
+  value: 'Project NAME TESTE HEADER'
+- name: 'vmImageName'
+  value: 'ubuntu-latest'
+- name: sonarQube-ProjectName
+  value: ProjectNameInSonarQube
+- name: sonarQube-ProjectKey
+  value: sonarQubeProjectKey
+- name: serviceConnection
+  value: 'sc-xxx-dev'
+
+pool:
+  vmImage: $(vmImageName)
+
+stages:
+- stage: Build
+  displayName: Build and Test
+
+  jobs:
+  - job: Build
+    displayName: Build
+    pool:
+      vmImage: $(vmImageName)
+
+    steps:
+    - task: UseDotNet@2
+      inputs:
+        version: '5.0.x'
+        includePreviewVersions: false
+
+    - task: DotNetCoreCLI@2
+      displayName: 'dotnet restore'
+      inputs:
+        command: restore
+        projects: '**/*.sln'
+        feedsToUse: config
+        nugetConfigPath: 'src/nuget.config'
+
+    - task: DotNetCoreCLI@2
+      displayName: 'dotnet build'
+      inputs:
+        command: 'build'
+        projects: |
+          $(workingDirectory)/*.csproj
+        arguments: --output $(System.DefaultWorkingDirectory)/publish_output --configuration $(buildConfiguration)
+        verbosityRestore: Detailed
+
+    - task: DotNetCoreCLI@2
+      displayName: 'dotnet test'
+      inputs:
+        command: 'test'
+        projects: |
+          **/*Tests/*Tests.csproj
+        arguments: '--configuration $(buildConfiguration) /p:CollectCoverage=true /p:CoverletOutputFormat=cobertura /p:CoverletOutput=$(Build.SourcesDirectory)/TestResults/Coverage/'
+        testRunTitle: $(ProjectTestName)
+        workingDirectory: '$(System.DefaultWorkingDirectory)'
+        verbosityRestore: Detailed
+    
+    - task: PublishCodeCoverageResults@1
+      displayName: 'Publish code coverage report'
+      inputs:
+        codeCoverageTool: 'Cobertura'
+        summaryFileLocation: '$(Build.SourcesDirectory)/TestResults/Coverage/coverage.cobertura.xml'
+
+- stage: SonarQube
+  dependsOn: Build
+  condition: succeeded()
+  displayName: SonarQube
+  jobs:  
+  - job: SonarQube
+    displayName: SonarQube
+    steps:
+    # Prepare Analysis Configuration task
+    - task: SonarQubePrepare@4
+      inputs:
+        SonarQube: 'SonarQubeServiceConnectionName'
+        scannerMode: 'MSBuild'
+        projectName: $(sonarQube-ProjectName)
+        projectKey: $(sonarQube-ProjectKey)
+        extraProperties: |
+          sonar.cs.opencover.reportsPaths=$(Build.SourcesDirectory)/TestResults/Coverage/coverage.cobertura.xml
+          sonar.coverage.exclusions=**/tests/**/*.*, **/api/**/*.*
+          sonar.cpd.exclusions=''
+          sonar.test.exclusions=''
+
+    - task: DotNetCoreCLI@2
+      displayName: 'dotnet build'
+      inputs:
+        command: 'build'
+        projects: |
+          $(workingDirectory)/*.csproj
+        arguments: --output $(System.DefaultWorkingDirectory)/publish_output --configuration $(buildConfiguration)
+
+    # Run Code Analysis task
+    - task: SonarQubeAnalyze@4
+
+    # Publish Quality Gate Result task
+    - task: SonarQubePublish@4
+      inputs:
+        pollingTimeoutSec: '300'
+
+- stage: Docker_Build
+  dependsOn: SonarQube
+  condition: succeeded()
+  displayName: ACR Build And Push
+  jobs:  
+  - job: ACR_Build_And_Push
+    displayName: ACR Build And Push
+    steps:
+    - task: Docker@2
+      displayName: Build and push an image to container registry
+      inputs:
+        command: buildAndPush
+        repository: $(imageRepository)
+        dockerfile: $(dockerfilePath)
+        containerRegistry: $(NAMEContainerRegistry-ServiceConnection)
+        tags: |
+          $(tag)
+
+- stage: Deploy_DEV
+  displayName: Deploy DEV
+  dependsOn: Docker_Build
+  condition: succeeded()
+
+  jobs:
+  - deployment: Deploy
+    displayName: Deploy DEV
+    environment: 'Backend-DEV'
+    variables:
+      - group: 'library-DEV'
+    pool:
+      vmImage: $(vmImageName)
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: AzureWebAppContainer@1
+            displayName: Azure Web App on Container Deploy
+            inputs:
+              appName: $(appName)
+              azureSubscription: $(serviceConnection)
+              imageName: $(ContainerRegistryName)/$(imageRepository):$(tag)
