@@ -1,0 +1,211 @@
+# Node.js with Angular
+# Build a Node.js project that uses Angular.
+# Add steps that analyze code, save build artifacts, deploy, and more:
+# https://docs.microsoft.com/azure/devops/pipelines/languages/javascript
+
+name: projectName-$(Date:yyyyMMdd)-$(Rev:r)
+
+resources:
+  repositories:
+  - repository: self
+    type: AzureRepos
+    trigger:
+      branches:
+        include:
+        - main
+      paths:
+        include:
+        - source/*
+        exclude:
+        - README.md
+
+variables:
+  - group: Library-Shared
+  - name: appName
+    value: 'appService-dev'
+  - name: tag
+    value: '$(Build.BuildId)'
+  - name: serviceConnection
+    value: 'sc-xxx-dev'
+
+pool:
+  vmImage: ubuntu-latest
+
+stages:
+  - stage: Build
+    displayName: Build stage
+    jobs:
+      - job: Build
+        displayName: Build
+        steps:
+          - task: Npm@1
+            displayName: "npm install"
+            inputs:
+              workingDir: source
+              verbose: false
+
+          - task: Npm@1
+            displayName: "perform unit tests"
+            inputs:
+              command: custom
+              workingDir: source
+              verbose: true
+              customCommand: "run test"
+
+          - task: PublishTestResults@2
+            displayName: 'publish unit test results'  
+            condition: succeededOrFailed()
+            inputs:
+              searchFolder: $(System.DefaultWorkingDirectory)/source/testresults/junit
+              testRunTitle: Angular
+              testResultsFormat: JUnit
+              testResultsFiles: "**/unit-test-result.xml"
+
+          - task: PublishCodeCoverageResults@1
+            displayName: 'publish code coverage report'
+            condition: succeededOrFailed()
+            inputs:
+              codeCoverageTool: Cobertura
+              summaryFileLocation: '$(System.DefaultWorkingDirectory)/source/coverage/cmaglobal/cobertura-coverage.xml'
+              failIfCoverageEmpty: true
+
+          - task: Npm@1
+            displayName: "npm build dev"
+            inputs:
+              command: custom
+              workingDir: source
+              verbose: true
+              customCommand: "run build_dev"
+
+          - task: Npm@1
+            displayName: "npm build qa"
+            inputs:
+              command: custom
+              workingDir: source
+              verbose: true
+              customCommand: "run build_qa"
+
+          - task: Npm@1
+            displayName: "npm build prd"
+            inputs:
+              command: custom
+              workingDir: source
+              verbose: true
+              customCommand: "run build_prd"
+
+  # ############################
+  # ######  ARCHIVE ZIP   ######
+  # ############################
+        
+          - task: ArchiveFiles@2
+            displayName: "Archive build-dev"
+            inputs:
+              rootFolderOrFile: source/dist/dev
+              archiveFile: "$(Build.ArtifactStagingDirectory)/$(appName)-$(tag)-dev.zip"
+              verbose: true
+
+          - task: ArchiveFiles@2
+            displayName: "Archive build-qa"
+            inputs:
+              rootFolderOrFile: source/dist/qa
+              archiveFile: "$(Build.ArtifactStagingDirectory)/$(appName)-$(tag)-qa.zip"
+              verbose: true
+
+          - task: ArchiveFiles@2
+            displayName: "Archive build-prd"
+            inputs:
+              rootFolderOrFile: source/dist/prd
+              archiveFile: "$(Build.ArtifactStagingDirectory)/$(appName)-$(tag)-prd.zip"
+              verbose: true
+
+  # #############################
+  # ####  PUBLISH ARTEFACT   ####
+  # #############################
+          - task: PublishPipelineArtifact@1
+            displayName: "Publish Artifact: drop-dev"
+            inputs:
+              targetPath: "$(Build.ArtifactStagingDirectory)/$(appName)-$(tag)-dev.zip"
+              artifact: $(appName)-$(tag)-dev.zip
+
+          - task: PublishPipelineArtifact@1
+            displayName: "Publish Artifact: drop-qa"
+            inputs:
+              targetPath: "$(Build.ArtifactStagingDirectory)/$(appName)-$(tag)-qa.zip"
+              artifact: $(appName)-$(tag)-qa.zip
+
+          - task: PublishPipelineArtifact@1
+            displayName: "Publish Artifact: drop-prd"
+            inputs:
+              targetPath: "$(Build.ArtifactStagingDirectory)/$(appName)-$(tag)-prd.zip"
+              artifact: $(appName)-$(tag)-prd.zip
+
+  # ############################
+  # ######   DEPLOY DEV   ######
+  # ####  USING LIBRARY DEV ####
+  # ############################
+
+  - stage: Deploy_DEV
+    displayName: Deploy stage
+    dependsOn:
+      - Build
+    condition: succeeded()
+    jobs:
+      - deployment: Deploy
+        displayName: Deploy StorageAccount-DEV
+        environment: 'Azure DEV'
+        variables:
+          - group: library-DEV
+          - name: env
+            value: dev
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: DownloadPipelineArtifact@2
+                  inputs:
+                    artifact: $(appName)-$(tag)-$(env).zip
+                    patterns: "**/*.zip"
+                    path: $(Build.SourcesDirectory)/$(appName)-$(tag)-$(env)/download
+
+                - task: ExtractFiles@1
+                  displayName: "Extract files"
+                  inputs:
+                    cleanDestinationFolder: true
+                    archiveFilePatterns: "**/*.zip"
+                    destinationFolder: "$(Build.SourcesDirectory)/$(appName)-$(tag)-$(env)/extract"
+
+                - task: AzureCLI@2
+                  displayName: "Azure CLI - Deploy dist files"
+                  inputs:
+                    azureSubscription: $(serviceConnection)
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      AZURE_STORAGE_CONNECTION_STRING=$(az storage account show-connection-string --name $(storageAccountName) --resource-group $(resourceGroupName) --query connectionString -o tsv)
+
+                      az storage blob upload-batch --source $(Build.SourcesDirectory)/$(appName)-$(tag)-$(env)/extract/$(env) --destination \$web --connection-string $AZURE_STORAGE_CONNECTION_STRING --no-progress
+                      
+                      az storage blob upload --file $(Build.SourcesDirectory)/$(appName)-$(tag)-$(env)/extract/$(env)/index.html --container-name \$web --name index.html --content-cache-control "no-cache" --connection-string $AZURE_STORAGE_CONNECTION_STRING --no-progress
+
+                    addSpnToEnvironment: true
+
+                - task: AzureCLI@2
+                  displayName: "Azure CLI  - Deleting older files"
+                  inputs:
+                    azureSubscription: $(serviceConnection)
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      AZURE_STORAGE_CONNECTION_STRING=$(az storage account show-connection-string --name $(storageAccountName) --resource-group $(resourceGroupName) --query connectionString -o tsv)
+
+                      oldFilesDateTime=$(date -d "-3 months"  +"%Y-%m-%dT%H:%MZ")
+
+                      az storage blob delete-batch --source \$web --if-unmodified-since $oldFilesDateTime --connection-string $AZURE_STORAGE_CONNECTION_STRING
+
+                - task: AzureCLI@2
+                  displayName: "Azure CLI - Purging CDN"
+                  inputs:
+                    azureSubscription: $(serviceConnection)
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: 'az cdn endpoint purge --resource-group $(resourceGroupName) --profile-name $(cdnProfileName) --name $(cdnEndpointName) --content-paths "/*"'
