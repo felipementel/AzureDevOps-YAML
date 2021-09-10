@@ -27,6 +27,12 @@ variables:
     value: '$(Build.BuildId)'
   - name: serviceConnection
     value: 'sc-xxx-dev'
+  - name: SonarQubeSC
+    value: SonarQubeServiceConnectionNAME
+  - name: sonarQube-ProjectName
+    value: ProjectNameInSonarQube
+  - name: sonarQube-ProjectKey
+    value: ProjectKeyInSonarQube
 
 pool:
   vmImage: ubuntu-latest
@@ -66,7 +72,7 @@ stages:
             condition: succeededOrFailed()
             inputs:
               codeCoverageTool: Cobertura
-              summaryFileLocation: '$(System.DefaultWorkingDirectory)/source/coverage/cmaglobal/cobertura-coverage.xml'
+              summaryFileLocation: '$(System.DefaultWorkingDirectory)/source/coverage/PROJECTNAME/cobertura-coverage.xml'
               failIfCoverageEmpty: true
 
           - task: Npm@1
@@ -92,6 +98,35 @@ stages:
               workingDir: source
               verbose: true
               customCommand: "run build_prd"
+              
+  # ###########################
+  # #####   SONARQUBE    ######
+  # ###########################
+
+          - task: SonarQubePrepare@4
+            inputs:
+              SonarQube: $(SonarQubeSC)
+              scannerMode: CLI
+              cliProjectName: $(sonarQube-ProjectName)
+              cliProjectKey: $(sonarQube-ProjectKey)
+              configMode: manual
+              extraProperties: |
+                sonar.cs.opencover.reportsPaths='$(System.DefaultWorkingDirectory)/source/coverage/PROJECTNAME/cobertura-coverage.xml'
+                sonar.coverage.exclusions=**/tests/**/*.*, **/api/**/*.*
+                sonar.cpd.exclusions=''
+                sonar.test.exclusions=**/*.spec.ts
+                sonar.exclusions=**/node_modules/**
+                sonar.projectVersion=1.0
+                sonar.sourceEncoding=UTF-8
+                sonar.sources=source
+        
+            # Run Code Analysis task
+          - task: SonarQubeAnalyze@4
+        
+            # Publish Quality Gate Result task
+          - task: SonarQubePublish@4
+            inputs:
+              pollingTimeoutSec: '300'
 
   # ############################
   # ######  ARCHIVE ZIP   ######
