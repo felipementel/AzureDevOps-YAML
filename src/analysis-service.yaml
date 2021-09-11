@@ -1,0 +1,52 @@
+#ref https://marketplace.visualstudio.com/items?itemName=liprec.vsts-release-aas&ssr=false#overview
+#ref https://github.com/liprec/vsts-release-aas
+
+name: aas-ProjectName-$(Date:yyyyMMdd)-$(Rev:r)
+
+resources:
+  repositories:
+  - repository: self
+    type: AzureRepos
+    trigger:
+      branches:
+        include:
+        - dev
+      paths:
+        include:
+        - src/ProjectFolder/*
+        exclude:
+        - README.md
+
+variables:
+- group: Library-Shared
+- group: Library-DEV
+- name: aasServer
+  value: asazure://aspaaseastus2.asazure.windows.net/ENDPOINT
+- name: modelName
+  value: 'DatabaseName'
+- name: bimPath
+  value: 'src/ProjectFolder/Model.bim'
+
+pool:
+  vmImage: windows-2019
+
+stages:
+- stage: Deploy
+  displayName: Deploy AAS
+
+  jobs:
+  - job: Deploy
+    displayName: Deploy AAS
+    steps:
+    - task: liprec.vsts-release-aas.deploy-aas-db.deploy-aas-db@1
+      displayName: 'Deploy model to AAS - ENDPOINT-NAME'
+      inputs:
+        ConnectedServiceNameARM: $(ServiceConnection)
+        aasServer: $(aasServer)
+        modelName: $(modelName)
+        loginType: spn
+        tenantId: $(serviceConnectionTenantId)
+        appId: $(serviceConnectionClientId)
+        appKey: $(serviceConnectionClientSecret)
+        pathToModel: $(bimPath)
+        connectionType: none
